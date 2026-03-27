@@ -1,8 +1,9 @@
-/// TCP server task — runs on Core 0 alongside WiFi
+/// Display coordinator — multiplexes TCP commands and on-device app ticking.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
+use embassy_futures::select::{self, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_time::{Duration, Timer};
@@ -10,6 +11,7 @@ use embedded_io_async::{Read, Write};
 use heapless::Vec as HVec;
 use log::info;
 
+use crate::app::{ActiveApp, ClockApp};
 use crate::bitmap_store::BitmapStore;
 use crate::framebuffer::{FBType, ShadowBuffer};
 use crate::protocol::{self, CmdResult};
@@ -17,16 +19,17 @@ use crate::text_overlay::TextOverlayManager;
 
 const PORT: u16 = 1337;
 
-/// Main TCP server loop
-pub async fn tcp_server_task(
+/// Main display coordinator loop — owns shadow/fb, runs TCP + apps
+pub async fn display_coordinator(
     stack: Stack<'static>,
     shadow: &'static mut ShadowBuffer,
     fb: &'static mut FBType,
 ) {
     let mut bitmaps = BitmapStore::new();
     let mut text_mgr = TextOverlayManager::new();
+    let mut app = ActiveApp::None;
 
-    info!("TCP server listening on port {}", PORT);
+    info!("Display coordinator started on port {}", PORT);
 
     loop {
         let mut rx_buffer = [0u8; 4096];
@@ -35,8 +38,45 @@ pub async fn tcp_server_task(
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(60)));
 
-        if let Err(e) = socket.accept(PORT).await {
-            info!("Accept error: {:?}", e);
+        // Outer loop: wait for client OR tick app
+        let accepted = loop {
+            if app.is_running() {
+                // Select between accept and app tick timer
+                match select::select(
+                    socket.accept(PORT),
+                    Timer::after(Duration::from_secs(1)),
+                )
+                .await
+                {
+                    Either::First(Ok(())) => break true,
+                    Either::First(Err(e)) => {
+                        info!("Accept error: {:?}", e);
+                        break false;
+                    }
+                    Either::Second(()) => {
+                        // Timer fired — tick the app
+                        app.tick(shadow, fb, &bitmaps);
+                        // Recreate socket for next accept attempt
+                        // (accept future was cancelled, socket is in clean state)
+                        drop(socket);
+                        socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
+                        socket.set_timeout(Some(Duration::from_secs(60)));
+                        continue;
+                    }
+                }
+            } else {
+                // No app running — just wait for client
+                match socket.accept(PORT).await {
+                    Ok(()) => break true,
+                    Err(e) => {
+                        info!("Accept error: {:?}", e);
+                        break false;
+                    }
+                }
+            }
+        };
+
+        if !accepted {
             Timer::after(Duration::from_secs(1)).await;
             continue;
         }
@@ -44,7 +84,16 @@ pub async fn tcp_server_task(
         info!("Client connected");
         let mut first_cmd = true;
 
-        handle_client(&mut socket, shadow, fb, &mut bitmaps, &mut text_mgr, &mut first_cmd).await;
+        handle_client(
+            &mut socket,
+            shadow,
+            fb,
+            &mut bitmaps,
+            &mut text_mgr,
+            &mut app,
+            &mut first_cmd,
+        )
+        .await;
 
         info!("Client disconnected");
         socket.close();
@@ -57,79 +106,137 @@ async fn handle_client(
     fb: &mut FBType,
     bitmaps: &mut BitmapStore,
     text_mgr: &mut TextOverlayManager,
+    app: &mut ActiveApp,
     first_cmd: &mut bool,
 ) {
     let mut line_buf: HVec<u8, 512> = HVec::new();
     let mut read_buf = [0u8; 2048];
 
     loop {
-        match socket.read(&mut read_buf).await {
-            Ok(0) => {
+        // Select between socket read and app tick
+        let read_result = if app.is_running() {
+            match select::select(
+                socket.read(&mut read_buf),
+                Timer::after(Duration::from_secs(1)),
+            )
+            .await
+            {
+                Either::First(result) => Some(result),
+                Either::Second(()) => {
+                    app.tick(shadow, fb, bitmaps);
+                    continue;
+                }
+            }
+        } else {
+            Some(socket.read(&mut read_buf).await)
+        };
+
+        let n = match read_result {
+            Some(Ok(0)) => {
                 info!("Client sent EOF");
                 break;
             }
-            Ok(n) => {
-                let mut pos = 0;
-                while pos < n {
-                    if let Some(nl) = read_buf[pos..n].iter().position(|&b| b == b'\n') {
-                        let _ = line_buf.extend_from_slice(&read_buf[pos..pos + nl]);
-                        pos += nl + 1;
+            Some(Ok(n)) => n,
+            Some(Err(e)) => {
+                info!("Socket read error: {:?}", e);
+                break;
+            }
+            None => continue,
+        };
 
-                        if let Ok(line) = core::str::from_utf8(&line_buf) {
-                            let line = line.trim();
-                            if !line.is_empty() {
-                                // Log command (truncate long ones)
-                                if line.len() <= 60 {
-                                    info!("CMD: {}", line);
-                                } else {
-                                    info!("CMD: {}... ({}b)", &line[..40], line.len());
-                                }
+        let mut pos = 0;
+        while pos < n {
+            if let Some(nl) = read_buf[pos..n].iter().position(|&b| b == b'\n') {
+                let _ = line_buf.extend_from_slice(&read_buf[pos..pos + nl]);
+                pos += nl + 1;
 
-                                if *first_cmd {
-                                    text_mgr.clear_all(shadow, fb);
-                                    *first_cmd = false;
-                                }
+                if let Ok(line) = core::str::from_utf8(&line_buf) {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        if line.len() <= 60 {
+                            info!("CMD: {}", line);
+                        } else {
+                            info!("CMD: {}... ({}b)", &line[..40], line.len());
+                        }
 
-                                match protocol::process_command(line, shadow, fb, bitmaps, text_mgr) {
-                                    CmdResult::None => {}
-                                    CmdResult::Response(resp) => {
-                                        info!("RSP: {}", resp.trim_end());
-                                        let _ = socket.write_all(resp.as_bytes()).await;
+                        if *first_cmd {
+                            text_mgr.clear_all(shadow, fb);
+                            *first_cmd = false;
+                        }
+
+                        // Stop app if drawing command arrives
+                        if app.is_running() && protocol::is_drawing_command(line) {
+                            app.stop();
+                        }
+
+                        match protocol::process_command(
+                            line, shadow, fb, bitmaps, text_mgr,
+                        ) {
+                            CmdResult::None => {}
+                            CmdResult::Response(resp) => {
+                                info!("RSP: {}", resp.trim_end());
+                                let _ = socket.write_all(resp.as_bytes()).await;
+                            }
+                            CmdResult::NeedUpload {
+                                name,
+                                width,
+                                height,
+                                total_bytes,
+                            } => {
+                                info!(
+                                    "UPLOAD: {} {}x{} = {} bytes",
+                                    name, width, height, total_bytes
+                                );
+                                let remaining = &read_buf[pos..n];
+                                match read_upload_data(socket, remaining, total_bytes)
+                                    .await
+                                {
+                                    Some((data, _leftover)) => {
+                                        let resp = protocol::complete_upload(
+                                            bitmaps, &name, width, height, data,
+                                        );
+                                        info!("  RSP: {}", resp.trim_end());
+                                        let _ =
+                                            socket.write_all(resp.as_bytes()).await;
+                                        pos = n; // consumed remaining
                                     }
-                                    CmdResult::NeedUpload { name, width, height, total_bytes } => {
-                                        info!("UPLOAD: {} {}x{} = {} bytes", name, width, height, total_bytes);
-                                        let remaining = &read_buf[pos..n];
-                                        info!("  remaining in buffer: {} bytes", remaining.len());
-                                        match read_upload_data(socket, remaining, total_bytes).await {
-                                            Some((data, leftover)) => {
-                                                info!("  received {} bytes, leftover {}", data.len(), leftover.len());
-                                                let resp = protocol::complete_upload(bitmaps, &name, width, height, data);
-                                                info!("  RSP: {}", resp.trim_end());
-                                                let _ = socket.write_all(resp.as_bytes()).await;
-                                                pos = n;
-                                            }
-                                            None => {
-                                                info!("  UPLOAD failed (timeout/disconnect)");
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    CmdResult::Wait(ms) => {
-                                        info!("WAIT {}ms", ms);
-                                        Timer::after(Duration::from_millis(ms as u64)).await;
+                                    None => {
+                                        info!("  UPLOAD failed");
+                                        return;
                                     }
                                 }
                             }
+                            CmdResult::Wait(ms) => {
+                                info!("WAIT {}ms", ms);
+                                Timer::after(Duration::from_millis(ms as u64)).await;
+                            }
+                            CmdResult::StartClock { unix_ts, timezones } => {
+                                info!(
+                                    "Starting clock app: ts={}, {} tzs",
+                                    unix_ts,
+                                    timezones.len()
+                                );
+                                *app = ActiveApp::Clock(ClockApp::new(
+                                    unix_ts, timezones,
+                                ));
+                                // Immediately tick to draw the clock
+                                app.tick(shadow, fb, bitmaps);
+                                let mut s = heapless::String::<64>::new();
+                                let _ = s.push_str("CLOCK OK\n");
+                                let _ = socket.write_all(s.as_bytes()).await;
+                            }
+                            CmdResult::StopApp => {
+                                app.stop();
+                                let mut s = heapless::String::<64>::new();
+                                let _ = s.push_str("APPSTOP OK\n");
+                                let _ = socket.write_all(s.as_bytes()).await;
+                            }
                         }
-                        line_buf.clear();
-                    } else {
-                        let _ = line_buf.extend_from_slice(&read_buf[pos..n]);
-                        break;
                     }
                 }
-            }
-            Err(e) => {
-                info!("Socket read error: {:?}", e);
+                line_buf.clear();
+            } else {
+                let _ = line_buf.extend_from_slice(&read_buf[pos..n]);
                 break;
             }
         }
@@ -142,7 +249,6 @@ async fn read_upload_data(
     initial: &[u8],
     total: usize,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
-    info!("  read_upload_data: need {} bytes, have {} initial", total, initial.len());
     let mut data = Vec::with_capacity(total + 64);
     data.extend_from_slice(initial);
 
@@ -154,21 +260,10 @@ async fn read_upload_data(
         )
         .await
         {
-            Ok(Ok(0)) => {
-                info!("  upload: EOF after {} bytes", data.len());
-                return None;
-            }
-            Ok(Ok(n)) => {
-                data.extend_from_slice(&read_buf[..n]);
-            }
-            Ok(Err(e)) => {
-                info!("  upload: read error {:?} after {} bytes", e, data.len());
-                return None;
-            }
-            Err(_) => {
-                info!("  upload: timeout after {} bytes", data.len());
-                return None;
-            }
+            Ok(Ok(0)) => return None,
+            Ok(Ok(n)) => data.extend_from_slice(&read_buf[..n]),
+            Ok(Err(_)) => return None,
+            Err(_) => return None,
         }
     }
 
@@ -178,6 +273,5 @@ async fn read_upload_data(
         Vec::new()
     };
     data.truncate(total);
-    info!("  upload complete: {} bytes received", total);
     Some((data, leftover))
 }

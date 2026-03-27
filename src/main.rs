@@ -28,6 +28,7 @@ use esp_rtos::embassy::InterruptExecutor;
 use log::info;
 use static_cell::StaticCell;
 
+mod app;
 mod bitmap_store;
 mod font;
 mod framebuffer;
@@ -36,6 +37,7 @@ mod pins;
 mod protocol;
 mod tcp_server;
 mod text_overlay;
+mod time_util;
 
 use framebuffer::ShadowBuffer;
 
@@ -236,7 +238,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     info!("Starting TCP server on port 1337");
-    tcp_server::tcp_server_task(stack, shadow, fb).await;
+    tcp_server::display_coordinator(stack, shadow, fb).await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await;

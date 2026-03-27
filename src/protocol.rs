@@ -5,6 +5,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::app::TzEntry;
 use crate::bitmap_store::BitmapStore;
 use crate::font;
 use crate::framebuffer::{FBType, ShadowBuffer, COLS, ROWS};
@@ -20,6 +21,11 @@ pub enum CmdResult {
         total_bytes: usize,
     },
     Wait(u32),
+    StartClock {
+        unix_ts: i64,
+        timezones: heapless::Vec<TzEntry, 5>,
+    },
+    StopApp,
 }
 
 fn parse_color(hex: &str) -> u32 {
@@ -63,10 +69,10 @@ pub fn process_command(
     let cmd = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
 
     // Collect remaining parts into fixed array
-    let mut parts: [&str; 8] = [""; 8];
+    let mut parts: [&str; 12] = [""; 12];
     let mut nparts = 0;
     for p in iter {
-        if nparts < 8 {
+        if nparts < 12 {
             parts[nparts] = p;
             nparts += 1;
         }
@@ -212,8 +218,51 @@ pub fn process_command(
             CmdResult::Wait(ms)
         }
 
+        "CLOCK" if nparts >= 3 => {
+            // CLOCK <unix_ts> <tz1_name> <tz1_offset_min> [<tz2_name> <tz2_offset> ...]
+            let unix_ts: i64 = parts[0].parse().unwrap_or(0);
+            let mut timezones = heapless::Vec::<TzEntry, 5>::new();
+            let mut i = 1;
+            while i + 1 < nparts {
+                let mut name = heapless::String::<8>::new();
+                let _ = name.push_str(parts[i]);
+                let offset: i16 = parts[i + 1].parse().unwrap_or(0);
+                let _ = timezones.push(TzEntry {
+                    name,
+                    offset_minutes: offset,
+                });
+                i += 2;
+            }
+            if timezones.is_empty() {
+                CmdResult::None
+            } else {
+                let mut s = heapless::String::<256>::new();
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("CLOCK OK {} timezones\n", timezones.len()),
+                );
+                // Return StartClock — coordinator will start the app and send response
+                CmdResult::StartClock { unix_ts, timezones }
+            }
+        }
+
+        "APPSTOP" => CmdResult::StopApp,
+
         _ => CmdResult::None,
     }
+}
+
+/// Check if a command is a drawing command that should stop an active app
+pub fn is_drawing_command(line: &str) -> bool {
+    let first = line.split_whitespace().next().unwrap_or("");
+    // Compare case-insensitively
+    first.eq_ignore_ascii_case("PX")
+        || first.eq_ignore_ascii_case("RECT")
+        || first.eq_ignore_ascii_case("TEXT")
+        || first.eq_ignore_ascii_case("BTEXT")
+        || first.eq_ignore_ascii_case("CLR")
+        || first.eq_ignore_ascii_case("CLRTXT")
+        || first.eq_ignore_ascii_case("SHOW")
 }
 
 /// Get the message part of a command (everything from the Nth whitespace-delimited word onwards)
