@@ -271,6 +271,13 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
+/// Called by esp-backtrace after printing a panic: reboot instead of halting.
+/// Watchdogs are off, so a halt would freeze the display showing a stale time.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn custom_halt() -> ! {
+    esp_hal::system::software_reset()
+}
+
 /// Hub75 render task — runs continuously on Core 1
 #[embassy_executor::task]
 async fn hub75_render_task(peripherals: Hub75Peripherals<'static>, fb: &'static mut FBType) {

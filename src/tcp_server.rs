@@ -221,6 +221,17 @@ async fn handle_client(
                                     if rle { "RLE" } else { "" },
                                     name, width, height, total_bytes
                                 );
+                                if let Err(e) =
+                                    protocol::validate_upload(width, height, total_bytes, rle)
+                                {
+                                    info!("  UPLOAD rejected: {}", e);
+                                    let mut s = heapless::String::<64>::new();
+                                    let _ = core::fmt::write(&mut s, format_args!("ERR {} {}\n", name, e));
+                                    let _ = socket.write_all(s.as_bytes()).await;
+                                    // The client sends the payload anyway — disconnect
+                                    // rather than parse binary data as commands.
+                                    return;
+                                }
                                 let remaining = &read_buf[pos..n];
                                 match read_upload_data(socket, remaining, total_bytes)
                                     .await

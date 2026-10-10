@@ -15,7 +15,7 @@ esp-rtos = { version = "0.2.0", features = ["esp-radio", "embassy", "esp32s3"] }
 
 # Core esp-hal (version must match esp-hub75's dep)
 esp-hal = { version = "1.0.0", features = ["esp32s3", "log-04", "unstable", "psram"] }
-esp-backtrace = { version = "0.18.1", features = ["esp32s3", "panic-handler", "println"] }
+esp-backtrace = { version = "0.18.1", features = ["esp32s3", "panic-handler", "custom-halt", "println"] }
 esp-println = { version = "0.16.1", features = ["esp32s3", "log-04"] }
 esp-alloc = "0.9.0"
 esp-bootloader-esp-idf = { version = "0.3", features = ["esp32s3"] }

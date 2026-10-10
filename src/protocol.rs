@@ -326,15 +326,8 @@ pub fn process_command(
             let mut time = heapless::String::<8>::new();
             let mut label = heapless::String::<24>::new();
             if nparts >= 1 {
-                let _ = time.push_str(&parts[0][..parts[0].len().min(8)]);
-                let rest = get_message_part(line, 2);
-                // Truncate byte-safely on a char boundary.
-                let max = 24usize.min(rest.len());
-                let mut end = max;
-                while end > 0 && !rest.is_char_boundary(end) {
-                    end -= 1;
-                }
-                let _ = label.push_str(&rest[..end]);
+                let _ = time.push_str(truncate_str(parts[0], 8));
+                let _ = label.push_str(truncate_str(get_message_part(line, 2), 24));
             }
             CmdResult::SetClockEvent { time, label }
         }
@@ -384,21 +377,43 @@ fn get_message_part(line: &str, skip_words: usize) -> &str {
     &line[start..]
 }
 
+/// Truncate to at most `max` bytes on a char boundary.
+fn truncate_str(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Largest bitmap accepted: a full screen of RGB888.
+pub const MAX_BITMAP_BYTES: usize = COLS * ROWS * 3;
+
+/// Check an upload's declared size before its payload is read.
+pub fn validate_upload(width: u16, height: u16, total_bytes: usize, rle: bool) -> Result<(), &'static str> {
+    let pixels = width as usize * height as usize;
+    if pixels == 0 || pixels * 3 > MAX_BITMAP_BYTES {
+        return Err("bad-size");
+    }
+    // RLE worst case is one 4-byte run per pixel
+    if rle && (total_bytes == 0 || total_bytes > pixels * 4) {
+        return Err("bad-rle-length");
+    }
+    Ok(())
+}
+
 /// Decode RLE data: [count, r, g, b, count, r, g, b, ...]
-pub fn decode_rle(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i + 3 < data.len() {
-        let count = data[i] as usize;
-        let r = data[i + 1];
-        let g = data[i + 2];
-        let b = data[i + 3];
+/// Output is capped at `max_len` bytes.
+pub fn decode_rle(data: &[u8], max_len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(max_len);
+    for run in data.chunks_exact(4) {
+        let count = (run[0] as usize).min((max_len - out.len()) / 3);
         for _ in 0..count {
-            out.push(r);
-            out.push(g);
-            out.push(b);
+            out.extend_from_slice(&run[1..4]);
         }
-        i += 4;
+        if out.len() + 3 > max_len {
+            break;
+        }
     }
     out
 }
@@ -412,13 +427,19 @@ pub fn complete_upload(
     data: Vec<u8>,
     rle: bool,
 ) -> heapless::String<64> {
+    let expected = width as usize * height as usize * 3;
     let rgb_data = if rle {
-        decode_rle(&data)
+        decode_rle(&data, expected)
     } else {
         data
     };
-    bitmaps.store(name, width, height, rgb_data);
     let mut s = heapless::String::<64>::new();
+    // BitmapStore::show indexes w*h*3 bytes — never store a short bitmap
+    if rgb_data.len() != expected {
+        let _ = core::fmt::write(&mut s, format_args!("ERR {} size-mismatch\n", name));
+        return s;
+    }
+    bitmaps.store(name, width, height, rgb_data);
     let _ = core::fmt::write(&mut s, format_args!("OK {} {} {}\n", name, width, height));
     s
 }

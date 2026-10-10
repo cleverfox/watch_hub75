@@ -69,11 +69,13 @@ impl ShadowBuffer {
         self.set_pixel(fb, x, y, r, g, b);
     }
 
-    /// Fill a rectangle
+    /// Fill a rectangle (clipped to the screen)
     pub fn fill_rect(&mut self, fb: &mut FBType, x: usize, y: usize, w: usize, h: usize, r: u8, g: u8, b: u8) {
-        for dy in 0..h {
-            for dx in 0..w {
-                self.set_pixel(fb, x + dx, y + dy, r, g, b);
+        let x_end = x.saturating_add(w).min(COLS);
+        let y_end = y.saturating_add(h).min(ROWS);
+        for py in y..y_end {
+            for px in x..x_end {
+                self.set_pixel(fb, px, py, r, g, b);
             }
         }
     }
