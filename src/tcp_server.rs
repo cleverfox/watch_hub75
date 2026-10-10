@@ -183,9 +183,11 @@ async fn handle_client(
                                 width,
                                 height,
                                 total_bytes,
+                                rle,
                             } => {
                                 info!(
-                                    "UPLOAD: {} {}x{} = {} bytes",
+                                    "UPLOAD{}: {} {}x{} = {} bytes",
+                                    if rle { "RLE" } else { "" },
                                     name, width, height, total_bytes
                                 );
                                 let remaining = &read_buf[pos..n];
@@ -194,7 +196,7 @@ async fn handle_client(
                                 {
                                     Some((data, _leftover)) => {
                                         let resp = protocol::complete_upload(
-                                            bitmaps, &name, width, height, data,
+                                            bitmaps, &name, width, height, data, rle,
                                         );
                                         info!("  RSP: {}", resp.trim_end());
                                         let _ =

@@ -9,6 +9,86 @@ use crate::font;
 use crate::framebuffer::{FBType, ShadowBuffer};
 use crate::time_util;
 
+// ---- Embedded mini flags (10x7 pixels, RGB) ----
+// Thai flag: red-white-blue-white-red horizontal stripes
+const FLAG_TH: [(u8, u8, u8); 70] = {
+    let mut f = [(0u8, 0u8, 0u8); 70];
+    let mut i = 0;
+    while i < 70 {
+        let row = i / 10;
+        f[i] = match row {
+            0     => (0xED, 0x1C, 0x24), // red
+            1     => (0xFF, 0xFF, 0xFF), // white
+            2 | 3 | 4 => (0x24, 0x1D, 0x4F), // blue
+            5     => (0xFF, 0xFF, 0xFF), // white
+            6     => (0xED, 0x1C, 0x24), // red
+            _     => (0, 0, 0),
+        };
+        i += 1;
+    }
+    f
+};
+
+// Russian flag: white-blue-red
+const FLAG_RU: [(u8, u8, u8); 70] = {
+    let mut f = [(0u8, 0u8, 0u8); 70];
+    let mut i = 0;
+    while i < 70 {
+        let row = i / 10;
+        f[i] = match row {
+            0 | 1     => (0xFF, 0xFF, 0xFF), // white
+            2 | 3 | 4 => (0x00, 0x39, 0xA6), // blue
+            5 | 6     => (0xD5, 0x2B, 0x1E), // red
+            _         => (0, 0, 0),
+        };
+        i += 1;
+    }
+    f
+};
+
+// Spanish flag: red-yellow-red
+const FLAG_ES: [(u8, u8, u8); 70] = {
+    let mut f = [(0u8, 0u8, 0u8); 70];
+    let mut i = 0;
+    while i < 70 {
+        let row = i / 10;
+        f[i] = match row {
+            0 | 1     => (0xAA, 0x15, 0x1B), // red
+            2 | 3 | 4 => (0xF1, 0xBF, 0x00), // yellow
+            5 | 6     => (0xAA, 0x15, 0x1B), // red
+            _         => (0, 0, 0),
+        };
+        i += 1;
+    }
+    f
+};
+
+/// Draw an embedded 10x7 flag at the given position
+fn draw_embedded_flag(
+    shadow: &mut ShadowBuffer,
+    fb: &mut FBType,
+    flag: &[(u8, u8, u8); 70],
+    x: usize,
+    y: usize,
+) {
+    for py in 0..7 {
+        for px in 0..10 {
+            let (r, g, b) = flag[py * 10 + px];
+            shadow.set_pixel(fb, x + px, y + py, r, g, b);
+        }
+    }
+}
+
+/// Look up a built-in flag by timezone name (case-insensitive)
+fn get_builtin_flag(tz_name: &str) -> Option<&'static [(u8, u8, u8); 70]> {
+    match tz_name {
+        "BKK" | "bkk" => Some(&FLAG_TH),
+        "MSK" | "msk" => Some(&FLAG_RU),
+        "MAD" | "mad" => Some(&FLAG_ES),
+        _ => None,
+    }
+}
+
 // Layout constants matching world_clock_rs.py
 const SIDE_X: i32 = 86;
 const MAIN_FLAG_X: usize = 39; // (SIDE_X - 8) / 2
@@ -165,19 +245,32 @@ impl ClockApp {
     ) {
         shadow.clear(fb, 0, 0, 0);
 
-        // Main flag: fl_<name> centered in left section
+        // Main flag: try uploaded bitmap, then built-in, then text
         if self.timezones.len() > 0 {
+            let tz = &self.timezones[0];
             let mut flag_name = String::<16>::new();
-            let _ = core::fmt::write(&mut flag_name, format_args!("fl_{}", self.timezones[0].name));
+            let _ = core::fmt::write(&mut flag_name, format_args!("fl_{}", tz.name));
             let name_lower: String<16> = lowercase(&flag_name);
-            bitmaps.show(shadow, fb, &name_lower, MAIN_FLAG_X, MAIN_FLAG_Y);
+            if !bitmaps.show(shadow, fb, &name_lower, MAIN_FLAG_X, MAIN_FLAG_Y) {
+                // No uploaded bitmap — try built-in flag
+                if let Some(flag) = get_builtin_flag(&tz.name) {
+                    draw_embedded_flag(shadow, fb, flag, MAIN_FLAG_X, MAIN_FLAG_Y);
+                } else {
+                    // No flag at all — render TZ name as text
+                    font::render_text(
+                        shadow, fb,
+                        MAIN_FLAG_X as i32, MAIN_FLAG_Y as i32 + 4,
+                        0x88, 0x88, 0x88, 1, &tz.name,
+                    );
+                }
+            }
         }
 
         // Side clocks layout (top to bottom):
         //   Slot 0 (tz[1]): GMT label (no flag) — for UTC
         //   Slot 1 (tz[2]): ES flag — for Madrid
         //   Slot 2 (tz[3]): RU flag — for Moscow
-        //
+
         // GMT label at top of side panel
         font::render_text(
             shadow, fb,
@@ -195,11 +288,24 @@ impl ClockApp {
             if i >= SIDE_FLAG_POS.len() {
                 break;
             }
+            let tz = &self.timezones[*tz_idx];
             let mut flag_name = String::<16>::new();
-            let _ = core::fmt::write(&mut flag_name, format_args!("fl_{}", self.timezones[*tz_idx].name));
+            let _ = core::fmt::write(&mut flag_name, format_args!("fl_{}", tz.name));
             let name_lower: String<16> = lowercase(&flag_name);
             let (fx, fy) = SIDE_FLAG_POS[i];
-            bitmaps.show(shadow, fb, &name_lower, fx, fy);
+            if !bitmaps.show(shadow, fb, &name_lower, fx, fy) {
+                // Try built-in flag
+                if let Some(flag) = get_builtin_flag(&tz.name) {
+                    draw_embedded_flag(shadow, fb, flag, fx, fy);
+                } else {
+                    // Text fallback
+                    font::render_text(
+                        shadow, fb,
+                        fx as i32, fy as i32 + 4,
+                        0x88, 0x88, 0x88, 1, &tz.name,
+                    );
+                }
+            }
         }
     }
 

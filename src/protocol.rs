@@ -19,6 +19,7 @@ pub enum CmdResult {
         width: u16,
         height: u16,
         total_bytes: usize,
+        rle: bool,
     },
     Wait(u32),
     StartClock {
@@ -177,6 +178,22 @@ pub fn process_command(
                 width: w,
                 height: h,
                 total_bytes: total,
+                rle: false,
+            }
+        }
+
+        "UPLOADRLE" if nparts >= 4 => {
+            let mut name = heapless::String::<32>::new();
+            let _ = name.push_str(parts[0]);
+            let w: u16 = parts[1].parse().unwrap_or(0);
+            let h: u16 = parts[2].parse().unwrap_or(0);
+            let rle_bytes: usize = parts[3].parse().unwrap_or(0);
+            CmdResult::NeedUpload {
+                name,
+                width: w,
+                height: h,
+                total_bytes: rle_bytes,
+                rle: true,
             }
         }
 
@@ -291,15 +308,40 @@ fn get_message_part(line: &str, skip_words: usize) -> &str {
     &line[start..]
 }
 
-/// Complete an UPLOAD
+/// Decode RLE data: [count, r, g, b, count, r, g, b, ...]
+pub fn decode_rle(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < data.len() {
+        let count = data[i] as usize;
+        let r = data[i + 1];
+        let g = data[i + 2];
+        let b = data[i + 3];
+        for _ in 0..count {
+            out.push(r);
+            out.push(g);
+            out.push(b);
+        }
+        i += 4;
+    }
+    out
+}
+
+/// Complete an UPLOAD (raw or RLE)
 pub fn complete_upload(
     bitmaps: &mut BitmapStore,
     name: &str,
     width: u16,
     height: u16,
     data: Vec<u8>,
+    rle: bool,
 ) -> heapless::String<64> {
-    bitmaps.store(name, width, height, data);
+    let rgb_data = if rle {
+        decode_rle(&data)
+    } else {
+        data
+    };
+    bitmaps.store(name, width, height, rgb_data);
     let mut s = heapless::String::<64>::new();
     let _ = core::fmt::write(&mut s, format_args!("OK {} {} {}\n", name, width, height));
     s
