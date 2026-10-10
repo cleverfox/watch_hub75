@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 use embassy_futures::select::{self, Either};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
-use embassy_time::{Duration, Timer};
+use core::sync::atomic::Ordering;
+
+use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::{Read, Write};
 use heapless::Vec as HVec;
 use log::info;
@@ -15,6 +17,7 @@ use crate::app::{ActiveApp, ClockApp};
 use crate::bitmap_store::BitmapStore;
 use crate::framebuffer::{FBType, ShadowBuffer};
 use crate::protocol::{self, CmdResult};
+use crate::sntp;
 use crate::text_overlay::TextOverlayManager;
 
 const PORT: u16 = 1337;
@@ -38,12 +41,15 @@ pub async fn display_coordinator(
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(60)));
 
-        // Outer loop: wait for client OR tick app
-        let accepted = loop {
-            if app.is_running() {
-                // Select between accept and app tick timer
+        // Outer loop: wait for client OR tick app.
+        // A single accept() future is kept alive across ticks: calling accept()
+        // again re-runs listen(), which fails with InvalidState while a
+        // handshake is in progress (and dropping the socket then RSTs it).
+        let accepted = {
+            let mut accept_fut = core::pin::pin!(socket.accept(PORT));
+            loop {
                 match select::select(
-                    socket.accept(PORT),
+                    accept_fut.as_mut(),
                     Timer::after(Duration::from_secs(1)),
                 )
                 .await
@@ -54,23 +60,17 @@ pub async fn display_coordinator(
                         break false;
                     }
                     Either::Second(()) => {
-                        // Timer fired — tick the app
+                        // Timer fired — maybe start the NTP clock, tick the app
+                        if let Some((unix_ts, at)) = sntp::NTP_TIME.try_take() {
+                            if !sntp::CLIENT_CONFIGURED.load(Ordering::Relaxed) && !app.is_running() {
+                                let unix_ts = unix_ts + (Instant::now() - at).as_secs() as i64;
+                                info!("NTP: auto-starting clock with time {}", unix_ts);
+                                app = ActiveApp::Clock(ClockApp::new(
+                                    unix_ts, crate::app::default_timezones(),
+                                ));
+                            }
+                        }
                         app.tick(shadow, fb, &bitmaps);
-                        // Recreate socket for next accept attempt
-                        // (accept future was cancelled, socket is in clean state)
-                        drop(socket);
-                        socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-                        socket.set_timeout(Some(Duration::from_secs(60)));
-                        continue;
-                    }
-                }
-            } else {
-                // No app running — just wait for client
-                match socket.accept(PORT).await {
-                    Ok(()) => break true,
-                    Err(e) => {
-                        info!("Accept error: {:?}", e);
-                        break false;
                     }
                 }
             }
@@ -162,6 +162,7 @@ async fn handle_client(
                         if *first_cmd {
                             text_mgr.clear_all(shadow, fb);
                             *first_cmd = false;
+                            sntp::CLIENT_CONFIGURED.store(true, Ordering::Relaxed);
                         }
 
                         // Stop app if drawing command arrives

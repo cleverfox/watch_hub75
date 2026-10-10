@@ -54,6 +54,15 @@ pub struct TzEntry {
     pub offset_minutes: i16,
 }
 
+/// Default timezones for the NTP auto-started clock: BKK +7h, UTC, MAD +2h, MSK +3h
+pub fn default_timezones() -> heapless::Vec<TzEntry, MAX_TZ> {
+    let mut tzs = heapless::Vec::new();
+    for (name, offset_minutes) in [("BKK", 420), ("UTC", 0), ("MAD", 120), ("MSK", 180)] {
+        let _ = tzs.push(TzEntry { name: String::try_from(name).unwrap(), offset_minutes });
+    }
+    tzs
+}
+
 pub enum ActiveApp {
     None,
     Clock(ClockApp),

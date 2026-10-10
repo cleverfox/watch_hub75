@@ -137,6 +137,15 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(wifi_task(controller)).ok();
     info!("WiFi spawned");
 
+    // NTP sync runs in the background from boot so the 10-min reboot deadline
+    // also covers a stuck WiFi link / DHCP (router slower to boot than us).
+    if let Some(ntp_server) = option_env!("WITH_NTP") {
+        info!("NTP: syncing with server {}", ntp_server);
+        spawner.spawn(sntp::ntp_sync_task(stack, ntp_server)).ok();
+    } else {
+        info!("NTP: not configured (compile with WITH_NTP=<ip> to enable)");
+    }
+
     // ---- HUB75 setup ----
     let hub75_peripherals = Hub75Peripherals {
         lcd_cam: peripherals.LCD_CAM,
@@ -238,32 +247,8 @@ async fn main(spawner: Spawner) -> ! {
         info!("IP drawn on display");
     }
 
-    // Try NTP if configured at compile time
-    let ntp_time = if option_env!("WITH_NTP").is_some() {
-        let ntp_server = option_env!("WITH_NTP").unwrap();
-        info!("NTP: trying server {}", ntp_server);
-        sntp::get_unix_time(stack, ntp_server).await
-    } else {
-        info!("NTP: not configured (compile with WITH_NTP=<ip> to enable)");
-        None
-    };
-
-    // Auto-start clock if NTP succeeded
-    let initial_app = if let Some(unix_ts) = ntp_time {
-        info!("NTP: auto-starting clock with time {}", unix_ts);
-        // Default timezones: BKK +7h, UTC, MAD +2h, MSK +3h
-        let mut tzs = heapless::Vec::<app::TzEntry, 5>::new();
-        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("BKK").unwrap(), offset_minutes: 420 });
-        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("UTC").unwrap(), offset_minutes: 0 });
-        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("MAD").unwrap(), offset_minutes: 120 });
-        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("MSK").unwrap(), offset_minutes: 180 });
-        Some(app::ActiveApp::Clock(app::ClockApp::new(unix_ts, tzs)))
-    } else {
-        None
-    };
-
     info!("Starting TCP server on port 1337");
-    tcp_server::display_coordinator(stack, shadow, fb, initial_app).await;
+    tcp_server::display_coordinator(stack, shadow, fb).await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
