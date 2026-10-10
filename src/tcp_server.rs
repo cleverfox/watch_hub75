@@ -235,6 +235,26 @@ async fn handle_client(
                                 let _ = s.push_str("APPSTOP OK\n");
                                 let _ = socket.write_all(s.as_bytes()).await;
                             }
+                            CmdResult::SetClockEvent { time, label } => {
+                                // Apply to the running clock app if any.
+                                match app {
+                                    ActiveApp::Clock(clk) => {
+                                        clk.set_event(time.as_str(), label.as_str());
+                                        let mut s = heapless::String::<64>::new();
+                                        if time.is_empty() {
+                                            let _ = s.push_str("CLKEVT CLEAR\n");
+                                        } else {
+                                            let _ = s.push_str("CLKEVT OK\n");
+                                        }
+                                        let _ = socket.write_all(s.as_bytes()).await;
+                                    }
+                                    _ => {
+                                        let mut s = heapless::String::<64>::new();
+                                        let _ = s.push_str("CLKEVT ERR no-clock\n");
+                                        let _ = socket.write_all(s.as_bytes()).await;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

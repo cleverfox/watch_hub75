@@ -105,7 +105,13 @@ struct TextSlot {
 }
 
 const SLOT_MAIN: TextSlot = TextSlot { x: 4, y: 26, r: 0x00, g: 0xFF, b: 0xAA, scale: 2 };
+// Date at its original vertical position — used when no upcoming event is shown.
 const SLOT_DATE: TextSlot = TextSlot { x: 4, y: 52, r: 0x66, g: 0x66, b: 0x66, scale: 1 };
+// Date shifted up — used when the event banner is shown below it.
+const SLOT_DATE_COMPACT: TextSlot = TextSlot { x: 4, y: 42, r: 0x66, g: 0x66, b: 0x66, scale: 1 };
+// Upcoming event banner. Stays in main section (x<SIDE_X) so it does not
+// collide with the Moscow side clock at y=58.
+const SLOT_EVENT: TextSlot = TextSlot { x: 4, y: 56, r: 0xFF, g: 0xAA, b: 0x44, scale: 1 };
 const SLOT_GMT_LABEL: TextSlot = TextSlot { x: SIDE_X + 8, y: 7, r: 0x44, g: 0x88, b: 0xFF, scale: 1 };
 
 // Side clock slots: correspond to timezone indices 1 (UTC), 2 (Madrid), 3 (Moscow)
@@ -125,8 +131,13 @@ const SIDE_FLAG_POS: [(usize, usize); 2] = [
 
 /// Maximum number of timezone entries
 const MAX_TZ: usize = 5;
-/// Number of tracked text slots: main + date + gmt_label + up to 3 side clocks = 6
+/// Number of tracked text slots: main + date + 3 side clocks + event = 6
+/// (gmt label is drawn as static and not tracked as a slot)
 const MAX_TEXT_SLOTS: usize = 6;
+/// Slot index for the date — reused whether it is drawn at normal or compact Y.
+const SLOT_IDX_DATE: usize = 1;
+/// Slot index for the upcoming-event banner.
+const SLOT_IDX_EVENT: usize = 5;
 
 #[derive(Clone)]
 pub struct TzEntry {
@@ -181,6 +192,12 @@ pub struct ClockApp {
     needs_static: bool,
     prev_texts: [String<16>; MAX_TEXT_SLOTS],
     thai_numerals: bool,
+    /// Upcoming event to display below the date. `time` empty = no event.
+    event_time: String<8>,
+    event_label: String<24>,
+    /// Which date layout was used last tick — detects none↔event transitions
+    /// so we can force a static redraw and erase the old date position.
+    prev_event_shown: bool,
 }
 
 impl ClockApp {
@@ -199,7 +216,22 @@ impl ClockApp {
             needs_static: true,
             prev_texts: Default::default(),
             thai_numerals,
+            event_time: String::new(),
+            event_label: String::new(),
+            prev_event_shown: false,
         }
+    }
+
+    /// Update the upcoming-event banner.
+    /// Empty `time` clears the banner.
+    pub fn set_event(&mut self, time: &str, label: &str) {
+        self.event_time.clear();
+        self.event_label.clear();
+        let _ = self.event_time.push_str(&time[..time.len().min(self.event_time.capacity())]);
+        let _ = self.event_label.push_str(&label[..label.len().min(self.event_label.capacity())]);
+        // Force an immediate redraw — the layout may need to flip between
+        // normal-date and compact-date + event.
+        self.last_minute = -1;
     }
 
     fn current_unix(&self) -> i64 {
@@ -325,6 +357,24 @@ impl ClockApp {
             offsets[i] = tz.offset_minutes;
         }
 
+        let event_shown = !self.event_time.is_empty();
+
+        // If the event presence changed since last tick, the old date was
+        // drawn at the other Y. Erase it before drawing at the new Y so we
+        // don't leave ghost pixels.
+        if event_shown != self.prev_event_shown {
+            let old_slot = if self.prev_event_shown { &SLOT_DATE_COMPACT } else { &SLOT_DATE };
+            let old = &self.prev_texts[SLOT_IDX_DATE];
+            if !old.is_empty() {
+                font::render_text(
+                    shadow, fb, old_slot.x, old_slot.y,
+                    0, 0, 0, old_slot.scale, old.as_str(),
+                );
+            }
+            // Force the date slot to re-render at the new position.
+            self.prev_texts[SLOT_IDX_DATE].clear();
+        }
+
         // Slot 0: main clock HH:MM (or Thai numerals if enabled)
         if tz_count > 0 {
             let dt = time_util::unix_to_datetime(now_unix, offsets[0]);
@@ -336,9 +386,10 @@ impl ClockApp {
                 self.update_slot(shadow, fb, 0, &SLOT_MAIN, text.as_str());
             }
 
-            // Slot 1: date
+            // Slot 1: date — choose Y based on whether the event banner is active.
             let date_text = time_util::format_date(&dt);
-            self.update_slot(shadow, fb, 1, &SLOT_DATE, &date_text);
+            let date_slot = if event_shown { &SLOT_DATE_COMPACT } else { &SLOT_DATE };
+            self.update_slot(shadow, fb, SLOT_IDX_DATE, date_slot, &date_text);
         }
 
         // Slots 2..4: side clocks
@@ -347,6 +398,34 @@ impl ClockApp {
             let text = time_util::format_hhmm(&dt);
             self.update_slot(shadow, fb, 2 + i, &SIDE_SLOTS[i], &text);
         }
+
+        // Slot 5: upcoming-event banner.
+        // Build "HH:MM label" (or just "HH:MM" if no label). Format in a
+        // small heapless buffer to avoid allocation.
+        if event_shown {
+            let mut line = String::<32>::new();
+            let _ = line.push_str(self.event_time.as_str());
+            if !self.event_label.is_empty() {
+                let _ = line.push(' ');
+                let _ = line.push_str(self.event_label.as_str());
+            }
+            // Truncate to 16 chars for the slot's prev_texts buffer.
+            let fit = {
+                let mut end = line.len().min(16);
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                end
+            };
+            self.update_slot(shadow, fb, SLOT_IDX_EVENT, &SLOT_EVENT, &line[..fit]);
+        } else {
+            // Clear event slot if it had anything before.
+            if !self.prev_texts[SLOT_IDX_EVENT].is_empty() {
+                self.update_slot(shadow, fb, SLOT_IDX_EVENT, &SLOT_EVENT, "");
+            }
+        }
+
+        self.prev_event_shown = event_shown;
     }
 
     fn update_slot(

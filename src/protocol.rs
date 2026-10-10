@@ -28,6 +28,12 @@ pub enum CmdResult {
         thai_numerals: bool,
     },
     StopApp,
+    /// Set or clear the "upcoming event" banner on the running ClockApp.
+    /// `time` empty string means: clear the event.
+    SetClockEvent {
+        time: heapless::String<8>,
+        label: heapless::String<24>,
+    },
 }
 
 fn parse_color(hex: &str) -> u32 {
@@ -265,6 +271,27 @@ pub fn process_command(
                 // Return StartClock — coordinator will start the app and send response
                 CmdResult::StartClock { unix_ts, timezones, thai_numerals }
             }
+        }
+
+        "CLKEVT" => {
+            // CLKEVT [hh:mm [label...]]
+            // - no args  : clear the event banner
+            // - hh:mm    : show time only
+            // - hh:mm L  : show "hh:mm L..."
+            let mut time = heapless::String::<8>::new();
+            let mut label = heapless::String::<24>::new();
+            if nparts >= 1 {
+                let _ = time.push_str(&parts[0][..parts[0].len().min(8)]);
+                let rest = get_message_part(line, 2);
+                // Truncate byte-safely on a char boundary.
+                let max = 24usize.min(rest.len());
+                let mut end = max;
+                while end > 0 && !rest.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let _ = label.push_str(&rest[..end]);
+            }
+            CmdResult::SetClockEvent { time, label }
         }
 
         "APPSTOP" => CmdResult::StopApp,
