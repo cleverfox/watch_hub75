@@ -86,6 +86,11 @@ class LEDClient:
         resp = self._send_recv(f"BRIGHTNESS {value}")
         return resp
 
+    def netcheck(self, *args):
+        """Configure connectivity check. No args: status; "on"/"off";
+        or ext_ip [int_ip]. Returns the response line."""
+        return self._send_recv(" ".join(["NETCHECK", *args]))
+
     def upload(self, name, image):
         """Upload a PIL Image to display flash storage as raw RGB.
         Image is stored on the display and can be shown with show()."""
