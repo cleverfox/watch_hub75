@@ -35,6 +35,7 @@ mod framebuffer;
 mod hub75_task;
 mod pins;
 mod protocol;
+mod sntp;
 mod tcp_server;
 mod text_overlay;
 mod time_util;
@@ -237,8 +238,32 @@ async fn main(spawner: Spawner) -> ! {
         info!("IP drawn on display");
     }
 
+    // Try NTP if configured at compile time
+    let ntp_time = if option_env!("WITH_NTP").is_some() {
+        let ntp_server = option_env!("WITH_NTP").unwrap();
+        info!("NTP: trying server {}", ntp_server);
+        sntp::get_unix_time(stack, ntp_server).await
+    } else {
+        info!("NTP: not configured (compile with WITH_NTP=<ip> to enable)");
+        None
+    };
+
+    // Auto-start clock if NTP succeeded
+    let initial_app = if let Some(unix_ts) = ntp_time {
+        info!("NTP: auto-starting clock with time {}", unix_ts);
+        // Default timezones: BKK +7h, UTC, MAD +2h, MSK +3h
+        let mut tzs = heapless::Vec::<app::TzEntry, 5>::new();
+        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("BKK").unwrap(), offset_minutes: 420 });
+        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("UTC").unwrap(), offset_minutes: 0 });
+        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("MAD").unwrap(), offset_minutes: 120 });
+        let _ = tzs.push(app::TzEntry { name: heapless::String::try_from("MSK").unwrap(), offset_minutes: 180 });
+        Some(app::ActiveApp::Clock(app::ClockApp::new(unix_ts, tzs)))
+    } else {
+        None
+    };
+
     info!("Starting TCP server on port 1337");
-    tcp_server::display_coordinator(stack, shadow, fb).await;
+    tcp_server::display_coordinator(stack, shadow, fb, initial_app).await;
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
