@@ -273,6 +273,51 @@ pub fn process_command(
             }
         }
 
+        "NETCHECK" => {
+            // NETCHECK               : report config/status
+            // NETCHECK off | on      : disable / enable with default hosts
+            // NETCHECK ext_ip [int_ip]: override hosts (and enable)
+            let mut s = heapless::String::<256>::new();
+            if nparts == 0 {
+                let state = if crate::netcheck::is_disabled() {
+                    "off"
+                } else {
+                    match crate::netcheck::status() {
+                        crate::netcheck::NET_OK => "ok",
+                        crate::netcheck::NET_LAN_ONLY => "lan-only",
+                        _ => "down",
+                    }
+                };
+                let _ = core::fmt::write(&mut s, format_args!("NETCHECK {}", state));
+                match crate::netcheck::ext_override() {
+                    Some(ip) => { let _ = core::fmt::write(&mut s, format_args!(" ext={}", ip)); }
+                    None => { let _ = s.push_str(" ext=default"); }
+                }
+                match crate::netcheck::int_override() {
+                    Some(ip) => { let _ = core::fmt::write(&mut s, format_args!(" int={}", ip)); }
+                    None => { let _ = s.push_str(" int=default"); }
+                }
+                let _ = s.push('\n');
+            } else if parts[0].eq_ignore_ascii_case("off") {
+                crate::netcheck::disable();
+                let _ = s.push_str("NETCHECK OFF\n");
+            } else if parts[0].eq_ignore_ascii_case("on") {
+                crate::netcheck::reset();
+                let _ = s.push_str("NETCHECK ON\n");
+            } else {
+                let ext = crate::sntp::parse_ipv4(parts[0]);
+                let int = if nparts >= 2 { crate::sntp::parse_ipv4(parts[1]).map(Some) } else { Some(None) };
+                match (ext, int) {
+                    (Some(ext), Some(int)) => {
+                        crate::netcheck::set_hosts(ext, int);
+                        let _ = s.push_str("NETCHECK OK\n");
+                    }
+                    _ => { let _ = s.push_str("NETCHECK ERR bad-ip\n"); }
+                }
+            }
+            CmdResult::Response(s)
+        }
+
         "CLKEVT" => {
             // CLKEVT [hh:mm [label...]]
             // - no args  : clear the event banner

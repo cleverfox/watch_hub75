@@ -234,6 +234,15 @@ impl ClockApp {
         self.last_minute = -1;
     }
 
+    /// Force all text slots to be redrawn on the next tick (without clearing
+    /// the screen) — restores pixels painted over by an overlay.
+    pub fn invalidate_texts(&mut self) {
+        for t in self.prev_texts.iter_mut() {
+            t.clear();
+        }
+        self.last_minute = -1;
+    }
+
     fn current_unix(&self) -> i64 {
         let elapsed = Instant::now() - self.sync_instant;
         self.sync_unix + elapsed.as_secs() as i64

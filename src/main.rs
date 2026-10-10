@@ -33,6 +33,7 @@ mod bitmap_store;
 mod font;
 mod framebuffer;
 mod hub75_task;
+mod netcheck;
 mod pins;
 mod protocol;
 mod sntp;
@@ -129,13 +130,15 @@ async fn main(spawner: Spawner) -> ! {
     let (stack, runner) = embassy_net::new(
         wifi_interface,
         net_config,
-        mk_static!(StackResources<3>, StackResources::<3>::new()),
+        mk_static!(StackResources<5>, StackResources::<5>::new()),
         seed,
     );
 
     spawner.spawn(net_task(runner)).ok();
     spawner.spawn(wifi_task(controller)).ok();
     info!("WiFi spawned");
+
+    spawner.spawn(netcheck::netcheck_task(stack)).ok();
 
     // NTP sync runs in the background from boot so the 10-min reboot deadline
     // also covers a stuck WiFi link / DHCP (router slower to boot than us).

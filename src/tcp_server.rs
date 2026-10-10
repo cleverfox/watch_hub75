@@ -17,6 +17,7 @@ use crate::app::{ActiveApp, ClockApp};
 use crate::bitmap_store::BitmapStore;
 use crate::framebuffer::{FBType, ShadowBuffer};
 use crate::protocol::{self, CmdResult};
+use crate::netcheck;
 use crate::sntp;
 use crate::text_overlay::TextOverlayManager;
 
@@ -31,6 +32,8 @@ pub async fn display_coordinator(
     let mut bitmaps = BitmapStore::new();
     let mut text_mgr = TextOverlayManager::new();
     let mut app = ActiveApp::None;
+    // Network status currently drawn over the clock
+    let mut net_shown = netcheck::NET_OK;
 
     info!("Display coordinator started on port {}", PORT);
 
@@ -70,7 +73,7 @@ pub async fn display_coordinator(
                                 ));
                             }
                         }
-                        app.tick(shadow, fb, &bitmaps);
+                        tick_app(&mut app, shadow, fb, &bitmaps, &mut net_shown);
                     }
                 }
             }
@@ -92,12 +95,38 @@ pub async fn display_coordinator(
             &mut text_mgr,
             &mut app,
             &mut first_cmd,
+            &mut net_shown,
         )
         .await;
 
         info!("Client disconnected");
         socket.close();
     }
+}
+
+/// Tick the app and overlay the network status line while it runs.
+fn tick_app(
+    app: &mut ActiveApp,
+    shadow: &mut ShadowBuffer,
+    fb: &mut FBType,
+    bitmaps: &BitmapStore,
+    net_shown: &mut u8,
+) {
+    let status = netcheck::status();
+    if let ActiveApp::Clock(clk) = app {
+        if status == netcheck::NET_OK && *net_shown != netcheck::NET_OK {
+            // Erase the line and redraw texts whose pixels it may have covered
+            netcheck::clear_status(shadow, fb);
+            clk.invalidate_texts();
+        }
+    }
+    app.tick(shadow, fb, bitmaps);
+    netcheck::set_enabled(matches!(app, ActiveApp::Clock(_)));
+    // Redrawn every tick: clock text outlines can paint over the bottom row
+    if app.is_running() {
+        netcheck::draw_status(shadow, fb, status);
+    }
+    *net_shown = status;
 }
 
 async fn handle_client(
@@ -108,6 +137,7 @@ async fn handle_client(
     text_mgr: &mut TextOverlayManager,
     app: &mut ActiveApp,
     first_cmd: &mut bool,
+    net_shown: &mut u8,
 ) {
     let mut line_buf: HVec<u8, 512> = HVec::new();
     let mut read_buf = [0u8; 2048];
@@ -123,7 +153,7 @@ async fn handle_client(
             {
                 Either::First(result) => Some(result),
                 Either::Second(()) => {
-                    app.tick(shadow, fb, bitmaps);
+                    tick_app(app, shadow, fb, bitmaps, net_shown);
                     continue;
                 }
             }
@@ -168,6 +198,7 @@ async fn handle_client(
                         // Stop app if drawing command arrives
                         if app.is_running() && protocol::is_drawing_command(line) {
                             app.stop();
+                            netcheck::set_enabled(false);
                         }
 
                         match protocol::process_command(
@@ -224,13 +255,14 @@ async fn handle_client(
                                     unix_ts, timezones, thai_numerals,
                                 ));
                                 // Immediately tick to draw the clock
-                                app.tick(shadow, fb, bitmaps);
+                                tick_app(app, shadow, fb, bitmaps, net_shown);
                                 let mut s = heapless::String::<64>::new();
                                 let _ = s.push_str("CLOCK OK\n");
                                 let _ = socket.write_all(s.as_bytes()).await;
                             }
                             CmdResult::StopApp => {
                                 app.stop();
+                                netcheck::set_enabled(false);
                                 let mut s = heapless::String::<64>::new();
                                 let _ = s.push_str("APPSTOP OK\n");
                                 let _ = socket.write_all(s.as_bytes()).await;
