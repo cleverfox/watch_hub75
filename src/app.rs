@@ -180,14 +180,16 @@ pub struct ClockApp {
     last_minute: i32,
     needs_static: bool,
     prev_texts: [String<16>; MAX_TEXT_SLOTS],
+    thai_numerals: bool,
 }
 
 impl ClockApp {
-    pub fn new(unix_ts: i64, timezones: heapless::Vec<TzEntry, MAX_TZ>) -> Self {
+    pub fn new(unix_ts: i64, timezones: heapless::Vec<TzEntry, MAX_TZ>, thai_numerals: bool) -> Self {
         info!(
-            "Clock started: unix={}, {} timezones",
+            "Clock started: unix={}, {} timezones, thai={}",
             unix_ts,
-            timezones.len()
+            timezones.len(),
+            thai_numerals,
         );
         ClockApp {
             sync_unix: unix_ts,
@@ -196,6 +198,7 @@ impl ClockApp {
             last_minute: -1,
             needs_static: true,
             prev_texts: Default::default(),
+            thai_numerals,
         }
     }
 
@@ -322,11 +325,16 @@ impl ClockApp {
             offsets[i] = tz.offset_minutes;
         }
 
-        // Slot 0: main clock HH:MM
+        // Slot 0: main clock HH:MM (or Thai numerals if enabled)
         if tz_count > 0 {
             let dt = time_util::unix_to_datetime(now_unix, offsets[0]);
-            let text = time_util::format_hhmm(&dt);
-            self.update_slot(shadow, fb, 0, &SLOT_MAIN, &text);
+            if self.thai_numerals {
+                let text = time_util::format_hhmm_thai(&dt);
+                self.update_slot(shadow, fb, 0, &SLOT_MAIN, text.as_str());
+            } else {
+                let text = time_util::format_hhmm(&dt);
+                self.update_slot(shadow, fb, 0, &SLOT_MAIN, text.as_str());
+            }
 
             // Slot 1: date
             let date_text = time_util::format_date(&dt);

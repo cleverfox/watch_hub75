@@ -25,6 +25,7 @@ pub enum CmdResult {
     StartClock {
         unix_ts: i64,
         timezones: heapless::Vec<TzEntry, 5>,
+        thai_numerals: bool,
     },
     StopApp,
 }
@@ -250,6 +251,9 @@ pub fn process_command(
                 });
                 i += 2;
             }
+            // Check for optional THAI keyword after timezone pairs
+            let thai_numerals = i < nparts && parts[i].eq_ignore_ascii_case("THAI");
+
             if timezones.is_empty() {
                 CmdResult::None
             } else {
@@ -259,7 +263,7 @@ pub fn process_command(
                     format_args!("CLOCK OK {} timezones\n", timezones.len()),
                 );
                 // Return StartClock — coordinator will start the app and send response
-                CmdResult::StartClock { unix_ts, timezones }
+                CmdResult::StartClock { unix_ts, timezones, thai_numerals }
             }
         }
 

@@ -87,6 +87,21 @@ pub fn format_hhmm(dt: &DateTime) -> String<8> {
     s
 }
 
+/// Format as "๑๗:๓๔" using Thai numerals (U+0E50–U+0E59)
+pub fn format_hhmm_thai(dt: &DateTime) -> String<16> {
+    let mut s = String::<16>::new();
+    // sentinel 0xFF marks the colon position
+    let digits: [u8; 5] = [dt.hour / 10, dt.hour % 10, 0xFF, dt.minute / 10, dt.minute % 10];
+    for &d in &digits {
+        if d == 0xFF {
+            let _ = s.push(':');
+        } else {
+            let _ = s.push(char::from_u32(0x0E50 + d as u32).unwrap_or('?'));
+        }
+    }
+    s
+}
+
 /// Format as "Tue 25 Mar"
 pub fn format_date(dt: &DateTime) -> String<16> {
     let mut s = String::new();

@@ -66,7 +66,7 @@ pub async fn display_coordinator(
                                 let unix_ts = unix_ts + (Instant::now() - at).as_secs() as i64;
                                 info!("NTP: auto-starting clock with time {}", unix_ts);
                                 app = ActiveApp::Clock(ClockApp::new(
-                                    unix_ts, crate::app::default_timezones(),
+                                    unix_ts, crate::app::default_timezones(), false,
                                 ));
                             }
                         }
@@ -213,14 +213,15 @@ async fn handle_client(
                                 info!("WAIT {}ms", ms);
                                 Timer::after(Duration::from_millis(ms as u64)).await;
                             }
-                            CmdResult::StartClock { unix_ts, timezones } => {
+                            CmdResult::StartClock { unix_ts, timezones, thai_numerals } => {
                                 info!(
-                                    "Starting clock app: ts={}, {} tzs",
+                                    "Starting clock app: ts={}, {} tzs, thai={}",
                                     unix_ts,
-                                    timezones.len()
+                                    timezones.len(),
+                                    thai_numerals,
                                 );
                                 *app = ActiveApp::Clock(ClockApp::new(
-                                    unix_ts, timezones,
+                                    unix_ts, timezones, thai_numerals,
                                 ));
                                 // Immediately tick to draw the clock
                                 app.tick(shadow, fb, bitmaps);
