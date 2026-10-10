@@ -185,7 +185,7 @@ async fn main(spawner: Spawner) -> ! {
             core::ptr::write_bytes(ptr as *mut u8, 0, core::mem::size_of::<ShadowBuffer>());
             uninit.assume_init_mut()
         };
-        s.brightness = 100; // Fix: zero-init set this to 0, must be 100
+        s.brightness = 50; // Fix: zero-init set this to 0, must be 100
         s
     };
 
@@ -235,13 +235,26 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Core 1 started (HUB75 render)");
 
-    // ---- Core 0: wait for IP then run TCP server ----
+    // ---- Boot progress display ----
+    // Stage 1: Hardware ready — green line
+    shadow.fill_rect(fb, 10, 10, COLS-20, 2, 0x00, 0xFF, 0x00);
+    info!("Boot: hardware ready (green line)");
+
+    // Stage 2: Wait for WiFi link
+    info!("Waiting for WiFi link...");
+    stack.wait_link_up().await;
+    shadow.fill_rect(fb, 10, 16, COLS-20, 2, 0x00, 0x00, 0xFF);
+    info!("Boot: WiFi connected (blue line)");
+
+    // Stage 3: Wait for DHCP
     info!("Waiting for DHCP...");
     stack.wait_config_up().await;
 
     if let Some(config) = stack.config_v4() {
         let ip = config.address.address();
         info!("Got IP: {}", ip);
+        // Clear the progress lines and show IP address
+        shadow.fill_rect(fb, 0, 28, COLS, 10, 0x00, 0x00, 0x00);
         let ip_str = alloc::format!("{}", ip);
         font::render_text(shadow, fb, 4, 32, 0xFF, 0xFF, 0xFF, 1, &ip_str);
         info!("IP drawn on display");
